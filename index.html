@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Squat Predictor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <style>
+      /* would move js/css/html to seperate files, but deploying on git, so it's easier combined in a singular file */
+      * {
+          box-sizing: border-box;
+      }
+
+      html, body {
+          margin: 0;
+          padding: 0;
+      }
+
+      body {
+          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+          background: linear-gradient(135deg, #0f1115, #1c2230);
+          color: white;
+
+          display: flex;
+          justify-content: center;
+          align-items: center;
+
+          min-height: 100dvh;
+          padding: 16px;
+      }
+
+      /* container */
+      .card {
+          width: 100%;
+          border: 2px solid rgba(255,255,255,0.06);
+          max-width: 420px;
+          padding: clamp(18px, 4vw, 28px);
+          border-radius: 16px;
+
+          background: rgba(255,255,255,0.05);
+          backdrop-filter: blur(12px);
+
+          box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+
+          animation: fadeIn 0.6s ease;
+      }
+
+      /* title */
+      h2 {
+          text-align: center;
+          margin: 0 0 8px 0;
+          font-size: clamp(20px, 5vw, 26px);
+      }
+
+      /* load animation */
+      @keyframes fadeIn {
+          from {
+              opacity: 0;
+              transform: translateY(16px);
+          }
+          to {
+              opacity: 1;
+              transform: translateY(0);
+          }
+      }
+
+      /* inputs */
+      input, select {
+          width: 100%;
+          padding: 12px;
+          margin-top: 10px;
+
+          border-radius: 10px;
+          border: none;
+
+          background: #2a2f3a;
+          color: white;
+
+          font-size: 16px;
+      }
+
+      /* buttons */
+      button {
+          width: 100%;
+          padding: 13px;
+          margin-top: 12px;
+
+          border-radius: 12px;
+          border: none;
+
+          background: linear-gradient(135deg, #4f8cff, #6ea8ff);
+          color: white;
+          font-weight: 600;
+
+          cursor: pointer;
+
+          transition: transform 0.15s ease, filter 0.15s ease;
+      }
+
+      /* hover only on devices that support it */
+      @media (hover: hover) {
+          button:hover {
+              transform: scale(1.02);
+              filter: brightness(1.1);
+          }
+      }
+
+      /* spacing sections */
+      .section {
+          margin-top: 20px;
+      }
+
+      /* result */
+      .result {
+          text-align: center;
+          font-size: clamp(16px, 4vw, 20px);
+          margin-top: 12px;
+          line-height: 1.4;
+      }
+
+      /* main prediction */
+      .result u {
+          font-size: clamp(20px, 5vw, 26px);
+          text-decoration-thickness: 2px;
+      }
+
+      /* sub text */
+      .sub {
+          text-align: center;
+          font-size: clamp(13px, 3.5vw, 15px);
+          opacity: 0.85;
+          margin-top: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Squat Predictor</h2>
+
+      <input id="bw" type="number" placeholder="Bodyweight" />
+      <input id="bp" type="number" placeholder="Bench" />
+
+      <select id="units">
+        <option value="lb">lbs</option>
+        <option value="kg">kg</option>
+      </select>
+
+      <button onclick="predict()">Predict Squat</button>
+
+      <div class="result" id="output"></div>
+
+      <!-- probability -->
+      <div class="section">
+        <input id="target" type="number" placeholder="Target squat" />
+        <button onclick="predict()">Calculate Probability</button>
+        <div class="sub" id="prob"></div>
+      </div>
+
+      <!-- inverse -->
+      <div class="section">
+        <input
+          id="target2"
+          type="number"
+          placeholder="Desired squat (find bench)"
+        />
+        <button onclick="solve()">Required Bench</button>
+        <div class="sub" id="inverse"></div>
+      </div>
+    </div>
+
+    <script>
+      const KG_TO_LB = 2.20462262;
+      const ERROR = 48; // MAE from training LinearRegression (LR) model
+      // Note: Tree models (LightGBM) were slightly better, with an error of 21.5kg compared to a 21.76kg error for LR, but LR is more portable.
+
+      function predict_squat_lb(BW, BP) {
+          return (
+              -39.7482575813751211
+              + 1.47533495965488703 * BW
+              + 0.501922188236834321 * BP
+              - 0.00350115653808089414 * (BW ** 2)
+              + 0.00436293123892320459 * (BP ** 2)
+              + 2.66661287095494061e-06 * (BW ** 3)
+              + 1.38090223576593626e-06 * (BW ** 2) * BP
+              - 7.64377142241504304e-06 * BW * (BP ** 2)
+              - 7.54795049194504362e-06 * (BP ** 3)
+              + 1.66361155400535639e-08 * BW * (BP ** 3)
+          );
+      }
+
+      // Laplace probability (uses MAE directly)
+      function probGreater(x, mu, b) {
+          if (x >= mu) return 0.5 * Math.exp(-(x - mu)/b);
+          else return 1 - 0.5 * Math.exp((x - mu)/b);
+      }
+
+      // predict
+      function predict() {
+          let bw = parseFloat(bwEl.value);
+          let bp = parseFloat(bpEl.value);
+          let target = parseFloat(targetEl.value);
+
+          if (isNaN(bw) || isNaN(bp)) {
+              output.innerHTML = "Enter bodyweight and bench";
+              return;
+          }
+
+          if (unitsEl.value === "kg") {
+              bw *= KG_TO_LB;
+              bp *= KG_TO_LB;
+              target *= KG_TO_LB;
+          }
+
+          let mu = predict_squat_lb(bw, bp);
+
+          let low = mu - ERROR;
+          let high = mu + ERROR;
+
+          output.innerHTML =
+              `${low.toFixed(0)} – <u>${mu.toFixed(0)}</u> – ${high.toFixed(0)} lb`;
+
+          if (!isNaN(target)) {
+              let p = probGreater(target, mu, ERROR);
+              prob.innerHTML =
+                  `Chance of ≥ ${target.toFixed(0)} lb: <b>${(p*100).toFixed(1)}%</b>`;
+          }
+      }
+
+      // inverse (using binary search)
+      function solve() {
+          let bw = parseFloat(bwEl.value);
+          let target = parseFloat(target2El.value);
+
+          if (isNaN(bw) || isNaN(target)) {
+              inverse.innerHTML = "Enter bodyweight & target squat";
+              return;
+          }
+
+          if (unitsEl.value === "kg") {
+              bw *= KG_TO_LB;
+              target *= KG_TO_LB;
+          }
+
+          // upper and lower bounds - could be more calibrated, but im lazy
+          let lo = 0, hi = 800;
+
+          for (let i = 0; i < 40; i++) {
+              let mid = (lo + hi) / 2;
+              let pred = predict_squat_lb(bw, mid);
+
+              if (pred < target) lo = mid;
+              else hi = mid;
+          }
+
+          inverse.innerHTML =
+              `Estimated bench needed: <b>${hi.toFixed(1)} lb</b>`;
+      }
+
+      // elements
+      const bwEl = document.getElementById("bw");
+      const bpEl = document.getElementById("bp");
+      const unitsEl = document.getElementById("units");
+      const output = document.getElementById("output");
+      const prob = document.getElementById("prob");
+      const inverse = document.getElementById("inverse");
+      const targetEl = document.getElementById("target");
+      const target2El = document.getElementById("target2");
+    </script>
+  </body>
+</html>
